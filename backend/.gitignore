@@ -1,6 +1,0 @@
-.env
-__pycache__
-storage
-sqlite3
-*.db
-*.sqlite
