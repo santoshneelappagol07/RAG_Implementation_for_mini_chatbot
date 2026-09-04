@@ -55,7 +55,20 @@ def get_embeddings() -> GoogleGenerativeAIEmbeddings:
     return _embeddings_instance
 
 
+def get_query_embedding(text: str) -> List[float]:
+    """Generates embedding vector for a single query string."""
+    embeddings = get_embeddings()
+    return embeddings.embed_query(text)
+
+
+async def get_query_embedding_async(text: str) -> List[float]:
+    """Asynchronously generates embedding vector for a query string."""
+    embeddings = get_embeddings()
+    return await embeddings.aembed_query(text)
+
+
 def _get_doc_vector_dir(document_id: int) -> str:
+
     return os.path.join(VECTOR_STORE_DIR, str(document_id))
 
 
@@ -96,7 +109,27 @@ def create_vector_index(document_id: int, pages: List[Dict[str, Any]]) -> int:
         raise ValueError("Cannot build vector index: no text chunks were generated.")
 
     embeddings = get_embeddings()
-    vector_store = FAISS.from_documents(documents=documents, embedding=embeddings)
+    batch_size = 20
+    vector_store = None
+
+    import time
+    for i in range(0, len(documents), batch_size):
+        batch = documents[i : i + batch_size]
+        for attempt in range(4):
+            try:
+                if vector_store is None:
+                    vector_store = FAISS.from_documents(documents=batch, embedding=embeddings)
+                else:
+                    vector_store.add_documents(batch)
+                break
+            except Exception as e:
+                if ("429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)) and attempt < 3:
+                    wait_sec = 20 * (attempt + 1)
+                    time.sleep(wait_sec)
+                else:
+                    raise
+        if i + batch_size < len(documents):
+            time.sleep(0.5)
 
     # Persist index to storage/vectors/{document_id}/
     target_dir = _get_doc_vector_dir(document_id)

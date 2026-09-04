@@ -33,5 +33,10 @@ class Document(Base):
     # LONGTEXT: handles long PDF text extractions without hitting MySQL's 64KB TEXT limit.
     extracted_text = Column(LONGTEXT, nullable=False)
 
+    # Optional Gemini Context Caching metadata (created if token count threshold met)
+    gemini_cache_name = Column(String(255), nullable=True)
+    gemini_cache_expires_at = Column(DateTime, nullable=True)
+
     created_at = Column(DateTime, server_default=func.now(), default=func.now())
+
 

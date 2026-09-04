@@ -1,0 +1,94 @@
+# Implementation Plan: Gemini Context Caching, Async Endpoints & Semantic Caching
+
+This plan details the implementation of three major performance and efficiency upgrades for the PDF Chatbot backend:
+1. **Async Endpoints & Non-blocking I/O** (`google.genai` async client + FastAPI async endpoints).
+2. **Semantic Caching** (Embedding similarity-based cache to answer paraphrased questions in <20ms without calling Gemini).
+3. **Gemini Context Caching** (Server-side context caching via `google.genai` caches API for large documents, reducing TTFT and API cost).
+
+---
+
+## User Review Required
+
+> [!IMPORTANT]
+> - **Gemini Context Caching Minimum Tokens**: Google's API enforces a minimum token threshold (~32,768 tokens) for context caches. For documents with fewer tokens, the system gracefully falls back to FAISS RAG + Semantic Caching automatically without failing.
+> - **Semantic Cache Similarity Threshold**: Default threshold is set to `0.90` cosine similarity (configurable via `SEMANTIC_CACHE_THRESHOLD` in `.env` and `config.py`).
+
+---
+
+## Proposed Changes
+
+### Configuration Layer
+
+#### [MODIFY] [config.py](file:///c:/Users/santosh/OneDrive/Desktop/Fastapi/projects/pdf-chatbot-gemini/backend/config.py)
+- Add configuration settings for semantic caching:
+  - `SEMANTIC_CACHE_ENABLED = True`
+  - `SEMANTIC_CACHE_THRESHOLD = 0.90` (cosine similarity score)
+  - `GEMINI_CONTEXT_CACHE_ENABLED = True`
+  - `GEMINI_CONTEXT_CACHE_TTL = 3600` (seconds)
+
+---
+
+### Caching Layer (Exact + Semantic)
+
+#### [MODIFY] [cache_service.py](file:///c:/Users/santosh/OneDrive/Desktop/Fastapi/projects/pdf-chatbot-gemini/backend/cache_service.py)
+- Add **Semantic Caching**:
+  - `get_semantic_cached_answer(document_id, query_embedding, threshold)`: Computes cosine similarity with cached question vectors for this document. If similarity >= threshold, returns the cached answer + matched question + score.
+  - `set_semantic_cached_answer(document_id, question, query_embedding, answer)`: Stores the question text, its embedding vector, and answer payload.
+  - Multi-tier retrieval flow: Tier 1 (Exact SHA-256 match, <1ms) -> Tier 2 (Semantic cosine similarity match, <15ms) -> LLM RAG.
+  - Support both Redis storage for vector payloads and in-memory fallback.
+
+---
+
+### LLM & Gemini Integration Layer
+
+#### [MODIFY] [llm_service.py](file:///c:/Users/santosh/OneDrive/Desktop/Fastapi/projects/pdf-chatbot-gemini/backend/llm_service.py)
+- Upgrade to **Async Google GenAI Client** (`_client.aio.models.generate_content` and `_client.aio.models.generate_content_stream`).
+- Implement **Context Caching Functions**:
+  - `create_gemini_context_cache(document_id, text, ttl)`: Calls `_client.aio.caches.create(...)` with graceful handling for minimum token limits.
+  - `answer_with_context_cache_async(cache_name, question)`: Queries Gemini utilizing `types.GenerateContentConfig(cached_content=cache_name)`.
+  - `stream_answer_with_context_cache_async(cache_name, question)`: Async streaming generator with cached context.
+- Add async RAG and fallback generation functions:
+  - `answer_question_with_rag_async(chunks, question)`
+  - `stream_answer_with_rag_async(chunks, question)`
+
+---
+
+### Vector Search Layer
+
+#### [MODIFY] [vector_service.py](file:///c:/Users/santosh/OneDrive/Desktop/Fastapi/projects/pdf-chatbot-gemini/backend/vector_service.py)
+- Provide async-friendly helper for generating single query embeddings:
+  - `get_query_embedding_async(query: str) -> List[float]`
+- Ensure FAISS retrieval can run in worker threads.
+
+---
+
+### Database & Models Layer
+
+#### [MODIFY] [models.py](file:///c:/Users/santosh/OneDrive/Desktop/Fastapi/projects/pdf-chatbot-gemini/backend/models.py)
+- Add optional `context_cache_name` and `context_cache_expiry` columns to `Document` to persist active Gemini cache IDs.
+
+---
+
+### FastAPI Endpoints Layer
+
+#### [MODIFY] [main.py](file:///c:/Users/santosh/OneDrive/Desktop/Fastapi/projects/pdf-chatbot-gemini/backend/main.py)
+- Convert `/ask` and `/ask/stream` into fully non-blocking `async def` endpoints:
+  1. Check **Exact Redis Cache** (<1ms) -> return if hit (`source="redis_exact"`).
+  2. Compute question embedding and check **Semantic Cache** (<15ms) -> return if hit (`source="semantic_cache"`).
+  3. Check if active **Gemini Context Cache** exists -> answer via cached context (`source="gemini_context_cache"`).
+  4. Fallback to **FAISS RAG** with async LLM invocation (`source="llm_rag"`).
+  5. Save answer to both exact cache and semantic vector cache.
+- Update `/upload` to attempt creating Gemini Context Cache if document is large enough.
+
+---
+
+## Verification Plan
+
+### Automated / Script Testing
+- Run test script calling `/ask` with identical questions (verifying exact cache hit).
+- Run test script calling `/ask` with rephrased questions (e.g. "What is the revenue?" vs "How much total revenue was earned?") to verify **semantic cache hit** and sub-20ms response time.
+- Verify streaming endpoint `/ask/stream` with SSE.
+- Test PDF upload and verify cache creation & FAISS indexing.
+
+### Performance Verification
+- Inspect response showing source type (`redis_exact`, `semantic_cache`, `gemini_context_cache`, `llm_rag`) and execution timing breakdown.

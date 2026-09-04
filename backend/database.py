@@ -44,3 +44,25 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def init_db():
+    """
+    Creates tables if they don't exist, and ensures all required columns exist
+    in existing tables (automatic self-healing migration).
+    """
+    Base.metadata.create_all(bind=engine)
+
+    try:
+        from sqlalchemy import inspect, text
+        with engine.begin() as conn:
+            inspector = inspect(engine)
+            if "documents" in inspector.get_table_names():
+                columns = {col["name"] for col in inspector.get_columns("documents")}
+                if "gemini_cache_name" not in columns:
+                    conn.execute(text("ALTER TABLE documents ADD COLUMN gemini_cache_name VARCHAR(255) NULL;"))
+                if "gemini_cache_expires_at" not in columns:
+                    conn.execute(text("ALTER TABLE documents ADD COLUMN gemini_cache_expires_at DATETIME NULL;"))
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Schema verification/migration note: %s", exc)

@@ -10,10 +10,11 @@ import os
 from dotenv import load_dotenv
 from sqlalchemy.engine import URL
 
-# Loads variables from a local .env file into the process environment.
-# In production you'd instead set these as real environment variables
-# (e.g. in Docker, or your hosting provider's dashboard).
-load_dotenv(override=True)
+# Loads variables from local .env files into the process environment
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_root_dir = os.path.dirname(_current_dir)
+load_dotenv(os.path.join(_root_dir, ".env"), override=True)
+load_dotenv(os.path.join(_current_dir, ".env"), override=True)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
@@ -29,7 +30,7 @@ os.makedirs(STORAGE_DIR, exist_ok=True)
 
 # The Gemini chat model. Centralized here so you can swap models in one
 # place later.
-CHAT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+CHAT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
 # --- RAG & Vector Store configuration ---
 # Embedding model used to convert text chunks into dense semantic vectors.
@@ -41,13 +42,12 @@ VECTOR_STORE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "sto
 os.makedirs(VECTOR_STORE_DIR, exist_ok=True)
 
 # Chunking parameters (RecursiveCharacterTextSplitter)
-# Smaller chunks = less text sent to LLM = faster responses
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "80"))
+# Rich context per chunk while keeping prompt concise
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "150"))
 
 # Number of relevant chunks retrieved per user question
-# Fewer chunks = smaller prompt = faster LLM generation
-TOP_K_CHUNKS = int(os.getenv("TOP_K_CHUNKS", "2"))
+TOP_K_CHUNKS = int(os.getenv("TOP_K_CHUNKS", "4"))
 
 # --- MySQL connection settings ---
 # Each piece is its own env var so you can change host/user/password
@@ -78,3 +78,15 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_DB = int(os.getenv("REDIS_DB", "0"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "") or None   # None = no auth
 REDIS_CACHE_TTL = int(os.getenv("REDIS_CACHE_TTL", "3600"))  # seconds
+
+# --- Semantic Caching settings ---
+# When enabled, questions with high semantic similarity to a previously
+# answered question for the same document are served from cache.
+SEMANTIC_CACHE_ENABLED = os.getenv("SEMANTIC_CACHE_ENABLED", "true").lower() in ("true", "1", "yes")
+SEMANTIC_CACHE_THRESHOLD = float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.90"))  # cosine similarity
+
+# --- Gemini Context Caching settings ---
+# Used to cache large document contexts directly on Google servers (TTL in seconds).
+GEMINI_CONTEXT_CACHE_ENABLED = os.getenv("GEMINI_CONTEXT_CACHE_ENABLED", "true").lower() in ("true", "1", "yes")
+GEMINI_CONTEXT_CACHE_TTL = int(os.getenv("GEMINI_CONTEXT_CACHE_TTL", "3600"))
+
