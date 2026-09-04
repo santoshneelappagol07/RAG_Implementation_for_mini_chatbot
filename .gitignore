@@ -1,0 +1,30 @@
+# ---- Environment & Secrets ----
+.env
+.env.*
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# ---- Storage (uploaded PDFs & FAISS indexes) ----
+storage/
+
+# ---- IDE / Editor ----
+.vscode/
+.idea/
+
+# ---- OS files ----
+.DS_Store
+Thumbs.db
+
+# ---- Database ----
+*.sqlite3
+*.db
+*.sqlite
