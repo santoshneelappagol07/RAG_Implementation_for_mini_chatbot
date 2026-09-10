@@ -1,0 +1,38 @@
+# ── Git & IDE ──
+.git
+.gitignore
+.vscode
+.idea
+
+# ── Environment secrets ──
+.env
+.env.*
+!.env.example
+
+# ── Python cache ──
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.pytest_cache
+venv
+.venv
+
+# ── Node modules (rebuilt in Docker) ──
+frontend/node_modules
+node_modules
+
+# ── Frontend dist (rebuilt in Docker) ──
+frontend/dist
+
+# ── Local storage (not needed in image) ──
+storage
+
+# ── Documentation & plans ──
+*.md
+implementation_plan*
+
+# ── Misc ──
+.DS_Store
+Thumbs.db
+*.log

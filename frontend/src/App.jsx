@@ -4,7 +4,9 @@ import {
   Clock, LogOut, Send, Sparkles, Copy, Check, UploadCloud, RefreshCw 
 } from 'lucide-react';
 
-const API_BASE = 'http://localhost:8000';
+// In production (Azure), frontend is served by FastAPI on the same origin → use ''
+// In local dev, Vite proxy forwards /api → localhost:8000 (see vite.config.js)
+const API_BASE = import.meta.env.DEV ? 'http://localhost:8000' : '';
 
 export default function App() {
   // ── Authentication state ──────────────────────────────────────────────

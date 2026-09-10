@@ -20,3 +20,12 @@ redis>=5.0
 faiss-cpu>=1.8.0
 langchain-text-splitters>=0.3.0
 langchain-community>=0.3.0
+
+# Auth & validation
+email-validator>=2.0
+
+# Production server (Azure App Service)
+gunicorn>=22.0
+
+# Static file serving (FastAPI StaticFiles)
+aiofiles>=23.0

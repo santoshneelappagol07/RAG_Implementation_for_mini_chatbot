@@ -148,7 +148,7 @@ async def stream_answer_from_text_async(
 # ── 2. Gemini Context Caching ─────────────────────────────────────────────
 
 async def create_gemini_context_cache_async(
-    document_id: int,
+    document_id,
     pdf_text: str,
     ttl_seconds: int = GEMINI_CONTEXT_CACHE_TTL,
 ) -> Optional[types.CachedContent]:

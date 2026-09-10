@@ -17,10 +17,12 @@ Docs UI at: http://127.0.0.1:8000/docs
 
 import asyncio
 import logging
+import os
 import time
 from typing import Optional, List, Union, Any
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pymongo.database import Database
 from pydantic import BaseModel, EmailStr, model_validator
 
@@ -228,7 +230,10 @@ async def logout(
     Invalidate the current session token (logout).
     """
     # Find and remove all sessions for this user
-    from backend.auth_service import _session_store
+    try:
+        from backend.auth_service import _session_store
+    except ImportError:
+        from auth_service import _session_store
     tokens_to_remove = [
         token for token, rec in _session_store.items()
         if rec["email"] == current_user
@@ -561,11 +566,37 @@ def clear_document_cache(document_id: str, current_user: str = Depends(get_curre
     }
 
 
-@app.get("/", tags=["Health"])
-async def root():
+@app.get("/api/health", tags=["Health"])
+async def health_check():
     return {
         "status": "ok",
         "message": "PDF Chatbot API is running with Auth, Async, Semantic Caching, and Gemini Context Caching.",
         "auth_info": "Send OTP via POST /auth/send-otp to get started.",
     }
+
+
+# ── Serve React Frontend Static Files ──────────────────────────────────
+# The built React app lives in frontend/dist/ after `npm run build`.
+# In Docker, it's copied into the container.
+_frontend_dist = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend", "dist")
+
+if os.path.isdir(_frontend_dist):
+    # Serve static assets (JS, CSS, images) under /assets/
+    app.mount("/assets", StaticFiles(directory=os.path.join(_frontend_dist, "assets")), name="static-assets")
+
+    @app.get("/")
+    @app.get("/{catch_all:path}")
+    async def serve_frontend(catch_all: str = ""):
+        """Serve React SPA — all non-API routes get index.html."""
+        index_file = os.path.join(_frontend_dist, "index.html")
+        if os.path.isfile(index_file):
+            return FileResponse(index_file)
+        return {"status": "ok", "message": "Frontend not built yet. Run: cd frontend && npm run build"}
+else:
+    @app.get("/", tags=["Health"])
+    async def root():
+        return {
+            "status": "ok",
+            "message": "PDF Chatbot API running. Frontend dist/ not found — build with: cd frontend && npm run build",
+        }
 
