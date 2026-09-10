@@ -9,8 +9,8 @@ Handles the RAG vector search lifecycle:
 """
 
 import os
-import shutil
-from typing import Optional, List, Dict, Any
+import shutil 
+from typing import Optional, List, Dict, Any, Union
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document as LCDocument
 from langchain_community.vectorstores.faiss import FAISS  # pyright: ignore[reportMissingImports]  # type: ignore
@@ -36,7 +36,7 @@ except ImportError:
     )
 
 # In-memory cache to keep active FAISS indexes in RAM for zero disk-load latency
-_vector_store_cache: Dict[int, FAISS] = {}
+_vector_store_cache: Dict[Any, FAISS] = {}
 
 # Reusable embedding instance
 _embeddings_instance: Optional[GoogleGenerativeAIEmbeddings] = None
@@ -67,12 +67,11 @@ async def get_query_embedding_async(text: str) -> List[float]:
     return await embeddings.aembed_query(text)
 
 
-def _get_doc_vector_dir(document_id: int) -> str:
-
+def _get_doc_vector_dir(document_id: Union[str, int]) -> str:
     return os.path.join(VECTOR_STORE_DIR, str(document_id))
 
 
-def create_vector_index(document_id: int, pages: List[Dict[str, Any]]) -> int:
+def create_vector_index(document_id: Union[str, int], pages: List[Dict[str, Any]]) -> int:
     """
     Splits page text using Recursive Character Chunking, attaches page metadata,
     computes Gemini embeddings, and builds a FAISS CPU index saved to disk & RAM.
@@ -142,7 +141,7 @@ def create_vector_index(document_id: int, pages: List[Dict[str, Any]]) -> int:
     return len(documents)
 
 
-def load_vector_index(document_id: int) -> Optional[FAISS]:
+def load_vector_index(document_id: Union[str, int]) -> Optional[FAISS]:
     """
     Loads FAISS index for document_id from RAM cache, or loads from disk if present.
     Returns None if no index exists yet for this document.
@@ -167,7 +166,7 @@ def load_vector_index(document_id: int) -> Optional[FAISS]:
 
 
 def get_relevant_chunks(
-    document_id: int, question: str, k: int = TOP_K_CHUNKS
+    document_id: Union[str, int], question: str, k: int = TOP_K_CHUNKS
 ) -> List[Dict[str, Any]]:
     """
     Performs similarity search in FAISS on the CPU and returns top K chunks
@@ -191,7 +190,7 @@ def get_relevant_chunks(
     return chunks
 
 
-def delete_vector_index(document_id: int) -> bool:
+def delete_vector_index(document_id: Union[str, int]) -> bool:
     """
     Removes the FAISS index from RAM and disk when a document is deleted.
     """

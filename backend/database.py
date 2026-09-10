@@ -1,68 +1,68 @@
 """
 database.py
 ------------
-Sets up the SQLAlchemy plumbing: the engine (knows how to reach MySQL),
-a session factory (opens a "conversation" with the DB per request), and
-the declarative Base that ORM models inherit from.
-
-Nothing PDF/Gemini-specific lives here — this file only knows about "how
-do I talk to the database", same separation-of-concerns idea as pdf_service.py.
+Sets up the MongoDB Atlas connection plumbing using PyMongo:
+- get_mongo_client(): manages connection pooling to MongoDB Atlas
+- get_db(): FastAPI dependency that yields the MongoDB database per request
+- init_db(): validates connection and ensures indexes on collections
 """
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+import logging
+from typing import Generator
+from pymongo import MongoClient
+from pymongo.database import Database
 
 try:
-    from backend.config import DATABASE_URL
+    from backend.config import MONGODB_URI, MONGODB_DB
 except ImportError:
-    from config import DATABASE_URL
+    from config import MONGODB_URI, MONGODB_DB
 
-# The engine manages the actual connection pool to MySQL.
-# pool_pre_ping=True checks a connection is still alive before using it —
-# avoids "MySQL server has gone away" errors after idle periods.
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+logger = logging.getLogger(__name__)
 
-# SessionLocal is a factory: calling SessionLocal() gives you a new session.
-# autocommit=False / autoflush=False are SQLAlchemy 2.0's sane defaults —
-# you explicitly call .commit() when you want changes saved.
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# All ORM model classes (see models.py) inherit from this Base.
-# It's what lets SQLAlchemy know "this Python class maps to a SQL table".
-Base = declarative_base()
+# Singleton MongoDB client instance
+_client: MongoClient = None
 
 
-def get_db():
+def get_mongo_client() -> MongoClient:
     """
-    FastAPI dependency: opens a session for the duration of one request,
-    and guarantees it's closed afterward (even if an error occurs).
-
-    Used in endpoints like: def upload_pdf(db: Session = Depends(get_db))
+    Returns a singleton MongoClient configured for MongoDB Atlas or local MongoDB.
     """
-    db = SessionLocal()
+    global _client
+    if _client is None:
+        _client = MongoClient(
+            MONGODB_URI,
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
+            socketTimeoutMS=10000,
+        )
+    return _client
+
+
+def get_db() -> Generator[Database, None, None]:
+    """
+    FastAPI dependency: yields the MongoDB Database instance for a request.
+
+    Used in endpoints like: def upload_pdf(db: Database = Depends(get_db))
+    """
+    client = get_mongo_client()
+    db = client[MONGODB_DB]
+    yield db
+
+
+def init_db() -> None:
+    """
+    Validates connection to MongoDB Atlas and ensures collection indexes exist.
+    """
     try:
-        yield db
-    finally:
-        db.close()
+        client = get_mongo_client()
+        # Verify connection to Atlas
+        client.admin.command("ping")
+        db = client[MONGODB_DB]
 
+        # Ensure indexes on documents collection for fast queries
+        db.documents.create_index("filename")
+        db.documents.create_index("created_at")
 
-def init_db():
-    """
-    Creates tables if they don't exist, and ensures all required columns exist
-    in existing tables (automatic self-healing migration).
-    """
-    Base.metadata.create_all(bind=engine)
-
-    try:
-        from sqlalchemy import inspect, text
-        with engine.begin() as conn:
-            inspector = inspect(engine)
-            if "documents" in inspector.get_table_names():
-                columns = {col["name"] for col in inspector.get_columns("documents")}
-                if "gemini_cache_name" not in columns:
-                    conn.execute(text("ALTER TABLE documents ADD COLUMN gemini_cache_name VARCHAR(255) NULL;"))
-                if "gemini_cache_expires_at" not in columns:
-                    conn.execute(text("ALTER TABLE documents ADD COLUMN gemini_cache_expires_at DATETIME NULL;"))
+        logger.info(" Connected successfully to MongoDB Atlas (Database: %s)", MONGODB_DB)
     except Exception as exc:
-        import logging
-        logging.getLogger(__name__).warning("Schema verification/migration note: %s", exc)
+        logger.warning(" MongoDB Atlas connection check/index setup note: %s", exc)

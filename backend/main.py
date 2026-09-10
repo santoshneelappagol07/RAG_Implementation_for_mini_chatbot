@@ -9,6 +9,7 @@ FastAPI app with:
   3. Gemini Context Caching for large documents
   4. FAISS Vector Search RAG for rapid, cited answers
   5. Async Streaming via Server-Sent Events (SSE)
+  6. Email OTP Authentication with session management
 
 Run with:  uvicorn backend.main:app --reload
 Docs UI at: http://127.0.0.1:8000/docs
@@ -17,11 +18,11 @@ Docs UI at: http://127.0.0.1:8000/docs
 import asyncio
 import logging
 import time
-from typing import Optional, List
+from typing import Optional, List, Union, Any
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pymongo.database import Database
+from pydantic import BaseModel, EmailStr, model_validator
 
 try:
     from backend.pdf_service import save_pdf_to_disk, extract_pages_from_pdf
@@ -40,7 +41,7 @@ try:
         delete_vector_index,
         get_query_embedding_async,
     )
-    from backend.database import Base, engine, get_db, init_db
+    from backend.database import get_db, init_db
     from backend.models import Document
     from backend.cache_service import (
         get_cached_answer,
@@ -50,6 +51,12 @@ try:
         invalidate_document_cache,
         get_cache_stats,
     )
+    from backend.auth_service import (
+        generate_otp, verify_otp, send_otp_email,
+        create_session, validate_session, get_session_remaining,
+        invalidate_session, get_current_user,
+    )
+    from backend.config import OTP_EXPIRY_SECONDS, SESSION_EXPIRY_SECONDS
 except ImportError:
     from pdf_service import save_pdf_to_disk, extract_pages_from_pdf
     from llm_service import (
@@ -67,7 +74,7 @@ except ImportError:
         delete_vector_index,
         get_query_embedding_async,
     )
-    from database import Base, engine, get_db, init_db
+    from database import get_db, init_db
     from models import Document
     from cache_service import (
         get_cached_answer,
@@ -77,6 +84,14 @@ except ImportError:
         invalidate_document_cache,
         get_cache_stats,
     )
+    from auth_service import (
+        generate_otp, verify_otp, send_otp_email,
+        create_session, validate_session, get_session_remaining,
+        invalidate_session, get_current_user,
+    )
+    from config import OTP_EXPIRY_SECONDS, SESSION_EXPIRY_SECONDS
+
+from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger("pdfchat_api")
 
@@ -85,21 +100,55 @@ app = FastAPI(
     version="2.0.0",
 )
 
-# Auto-create schema for models and self-heal missing columns if database is reachable
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Connect to MongoDB Atlas and verify index creation
 try:
     init_db()
 except Exception as e:
-    logger.warning("Database schema creation deferred (database connection pending): %s", e)
+    logger.warning("MongoDB Atlas initialization deferred: %s", e)
 
 
+
+# ── Auth request/response models ─────────────────────────────────────────
+
+class SendOtpRequest(BaseModel):
+    email: EmailStr
+
+
+class VerifyOtpRequest(BaseModel):
+    email: EmailStr
+    otp: str
+
+
+# ── Existing request/response models ────────────────────────────────────
 
 class AskRequest(BaseModel):
-    document_id: int
+    document_id: Optional[Union[str, int]] = None
+    id: Optional[Union[str, int]] = None
     question: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_document_id(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            doc_id = values.get("document_id") or values.get("id")
+            if not doc_id:
+                raise ValueError("Either 'document_id' or 'id' must be provided.")
+            values["document_id"] = doc_id
+            values["id"] = doc_id
+        return values
 
 
 class AskResponse(BaseModel):
-    document_id: int
+    document_id: Union[str, int]
+    id: Optional[Union[str, int]] = None
     question: str
     answer: str
     source: str  # "redis_exact", "semantic_cache", "gemini_context_cache", "llm_rag", "llm_fallback"
@@ -108,12 +157,105 @@ class AskResponse(BaseModel):
     similarity_score: Optional[float] = None
     matched_question: Optional[str] = None
 
+    @model_validator(mode="after")
+    def populate_id(self) -> "AskResponse":
+        if self.id is None:
+            self.id = self.document_id
+        return self
 
-@app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)):
+
+# ═══════════════════════════════════════════════════════════════════════
+# AUTH ENDPOINTS (public — no token required)
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.post("/auth/send-otp", tags=["Authentication"])
+async def send_otp(request: SendOtpRequest):
+    """
+    Send a 6-digit OTP to the provided email address.
+    The OTP expires after 10 minutes.
+    """
+    otp = generate_otp(request.email)
+    try:
+        await asyncio.to_thread(send_otp_email, request.email, otp)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "message": f"OTP sent to {request.email}",
+        "expires_in_seconds": OTP_EXPIRY_SECONDS,
+    }
+
+
+@app.post("/auth/verify-otp", tags=["Authentication"])
+async def verify_otp_endpoint(request: VerifyOtpRequest):
+    """
+    Verify the OTP and receive a session token.
+    Use this token in the Authorization header: Bearer <token>
+    """
+    if not verify_otp(request.email, request.otp):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired OTP. Please request a new one via /auth/send-otp.",
+        )
+
+    token = create_session(request.email)
+    return {
+        "message": "Login successful",
+        "email": request.email,
+        "token": token,
+        "token_type": "bearer",
+        "session_expires_in_seconds": SESSION_EXPIRY_SECONDS,
+    }
+
+
+@app.get("/auth/me", tags=["Authentication"])
+async def auth_me(current_user: str = Depends(get_current_user)):
+    """
+    Returns the currently authenticated user info and session time remaining.
+    Requires a valid Bearer token.
+    """
+    return {
+        "email": current_user,
+        "authenticated": True,
+    }
+
+
+@app.post("/auth/logout", tags=["Authentication"])
+async def logout(
+    current_user: str = Depends(get_current_user),
+):
+    """
+    Invalidate the current session token (logout).
+    """
+    # Find and remove all sessions for this user
+    from backend.auth_service import _session_store
+    tokens_to_remove = [
+        token for token, rec in _session_store.items()
+        if rec["email"] == current_user
+    ]
+    for token in tokens_to_remove:
+        invalidate_session(token)
+
+    return {
+        "message": f"Logged out {current_user}",
+        "email": current_user,
+        "sessions_invalidated": len(tokens_to_remove),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# PROTECTED ENDPOINTS (Bearer token required)
+# ═══════════════════════════════════════════════════════════════════════
+
+@app.post("/upload", tags=["Documents"])
+async def upload_pdf(
+    file: UploadFile = File(...),
+    db: Database = Depends(get_db),
+    current_user: str = Depends(get_current_user),
+):
     """
     Accepts a PDF upload, extracts text, indexes chunks in FAISS,
-    and initializes Gemini Context Caching when applicable.
+    stores metadata in MongoDB Atlas, and initializes Gemini Context Caching when applicable.
     """
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only .pdf files are accepted")
@@ -132,18 +274,15 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse PDF text: {str(e)}")
 
-    # 1. Store document metadata in database
+    # 1. Store document metadata in MongoDB Atlas
     try:
         document = Document(
             filename=file.filename,
             file_path=file_path,
             extracted_text=full_text,
         )
-        db.add(document)
-        db.commit()
-        db.refresh(document)
+        await asyncio.to_thread(Document.insert, db, document)
     except Exception as e:
-        db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error saving document: {str(e)}")
 
     # 2. Build FAISS vector index in background thread
@@ -162,13 +301,14 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
         cache_obj = await create_gemini_context_cache_async(document.id, full_text)
         if cache_obj:
             document.gemini_cache_name = cache_obj.name
-            db.commit()
+            await asyncio.to_thread(document.update_cache, db, cache_obj.name)
             context_cached = True
             cache_info = cache_obj.name
     except Exception as e:
         logger.warning("Gemini context caching initialization note: %s", e)
 
     return {
+        "id": document.id,
         "document_id": document.id,
         "filename": document.filename,
         "file_path": document.file_path,
@@ -177,12 +317,16 @@ async def upload_pdf(file: UploadFile = File(...), db: Session = Depends(get_db)
         "characters_extracted": len(full_text),
         "gemini_context_cache_created": context_cached,
         "gemini_cache_name": cache_info,
-        "message": "PDF uploaded, indexed with FAISS vector store, and ready for /ask.",
+        "message": "PDF uploaded, stored in MongoDB Atlas, indexed with FAISS vector store, and ready for /ask.",
     }
 
 
-@app.post("/ask", response_model=AskResponse)
-async def ask_question(request: AskRequest, db: Session = Depends(get_db)):
+@app.post("/ask", response_model=AskResponse, tags=["Documents"])
+async def ask_question(
+    request: AskRequest,
+    db: Database = Depends(get_db),
+    current_user: str = Depends(get_current_user),
+):
     """
     RAG & Multi-Tier Cached Question Answering:
     1. Tier 1: Check Exact Cache (< 1ms)
@@ -237,7 +381,7 @@ async def ask_question(request: AskRequest, db: Session = Depends(get_db)):
     # ── 3. Database Lookup ──────────────────────────────────────────
     t0 = time.perf_counter()
     document = await asyncio.to_thread(
-        lambda: db.query(Document).filter(Document.id == request.document_id).first()
+        Document.find_by_id, db, request.document_id
     )
     t_db = time.perf_counter() - t0
 
@@ -263,6 +407,7 @@ async def ask_question(request: AskRequest, db: Session = Depends(get_db)):
         except Exception as e:
             logger.warning("Context cache query failed, falling back to RAG: %s", e)
             document.gemini_cache_name = None
+            await asyncio.to_thread(document.update_cache, db, None)
 
     # Option B: FAISS RAG
     if not document.gemini_cache_name:
@@ -307,8 +452,12 @@ async def ask_question(request: AskRequest, db: Session = Depends(get_db)):
     )
 
 
-@app.post("/ask/stream")
-async def ask_question_stream(request: AskRequest, db: Session = Depends(get_db)):
+@app.post("/ask/stream", tags=["Documents"])
+async def ask_question_stream(
+    request: AskRequest,
+    db: Database = Depends(get_db),
+    current_user: str = Depends(get_current_user),
+):
     """
     Async Streaming RAG version of /ask with Server-Sent Events (SSE).
     """
@@ -339,7 +488,7 @@ async def ask_question_stream(request: AskRequest, db: Session = Depends(get_db)
 
     # ── 3. Database Lookup ──────────────────────────────────────────
     document = await asyncio.to_thread(
-        lambda: db.query(Document).filter(Document.id == request.document_id).first()
+        Document.find_by_id, db, request.document_id
     )
     if document is None:
         raise HTTPException(
@@ -389,16 +538,16 @@ async def ask_question_stream(request: AskRequest, db: Session = Depends(get_db)
 
 # ── Cache & Vector management endpoints ──────────────────────────────────
 
-@app.get("/cache/stats")
-def cache_stats():
+@app.get("/cache/stats", tags=["Cache"])
+def cache_stats(current_user: str = Depends(get_current_user)):
     """
     Returns exact and semantic cache hits, misses, and hit rate.
     """
     return get_cache_stats()
 
 
-@app.delete("/cache/{document_id}")
-def clear_document_cache(document_id: int):
+@app.delete("/cache/{document_id}", tags=["Cache"])
+def clear_document_cache(document_id: str, current_user: str = Depends(get_current_user)):
     """
     Deletes cached answers in Redis/Memory and frees FAISS vector index.
     """
@@ -412,10 +561,11 @@ def clear_document_cache(document_id: int):
     }
 
 
-@app.get("/")
+@app.get("/", tags=["Health"])
 async def root():
     return {
         "status": "ok",
-        "message": "PDF Chatbot API is running with Async, Semantic Caching, and Gemini Context Caching.",
+        "message": "PDF Chatbot API is running with Auth, Async, Semantic Caching, and Gemini Context Caching.",
+        "auth_info": "Send OTP via POST /auth/send-otp to get started.",
     }
 

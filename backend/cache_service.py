@@ -17,18 +17,18 @@ import json
 import logging
 import math
 import time
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any, Tuple, Union
 
 import redis
 
 try:
     from backend.config import (
-        REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_CACHE_TTL,
+        REDIS_URL, REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_SSL, REDIS_CACHE_TTL,
         SEMANTIC_CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD,
     )
 except ImportError:
     from config import (
-        REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_CACHE_TTL,
+        REDIS_URL, REDIS_HOST, REDIS_PORT, REDIS_DB, REDIS_PASSWORD, REDIS_SSL, REDIS_CACHE_TTL,
         SEMANTIC_CACHE_ENABLED, SEMANTIC_CACHE_THRESHOLD,
     )
 
@@ -38,17 +38,28 @@ logger = logging.getLogger(__name__)
 _redis_client: Optional[redis.Redis] = None
 
 try:
-    _redis_client = redis.Redis(
-        host=REDIS_HOST,
-        port=REDIS_PORT,
-        db=REDIS_DB,
-        password=REDIS_PASSWORD,
-        decode_responses=True,
-        socket_connect_timeout=3,
-        socket_timeout=3,
-    )
-    _redis_client.ping()
-    logger.info("✅ Connected to Redis at %s:%s", REDIS_HOST, REDIS_PORT)
+    if REDIS_URL:
+        _redis_client = redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+        )
+        _redis_client.ping()
+        logger.info(" Connected to Redis via REDIS_URL")
+    else:
+        _redis_client = redis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            db=REDIS_DB,
+            password=REDIS_PASSWORD,
+            ssl=REDIS_SSL,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+        )
+        _redis_client.ping()
+        logger.info(" Connected to Redis at %s:%s (ssl=%s)", REDIS_HOST, REDIS_PORT, REDIS_SSL)
 except Exception as exc:
     logger.warning(
         "⚠️  Redis unavailable (%s). Using in-memory caching fallback.", exc,
@@ -64,21 +75,21 @@ _stats = {
 
 # In-memory fallbacks when Redis is not running
 _memory_exact_cache: Dict[str, str] = {}
-_memory_semantic_cache: Dict[int, List[Dict[str, Any]]] = {}
+_memory_semantic_cache: Dict[Any, List[Dict[str, Any]]] = {}
 
 # ── Key helpers ─────────────────────────────────────────────────────────
 _KEY_PREFIX = "pdfchat:"
 _SEMANTIC_KEY_PREFIX = "pdfchat:semantic:"
 
 
-def _make_key(document_id: int, question: str) -> str:
+def _make_key(document_id: Union[str, int], question: str) -> str:
     """Deterministic exact cache key."""
     raw = f"{document_id}:{question.strip().lower()}"
     digest = hashlib.sha256(raw.encode()).hexdigest()
     return f"{_KEY_PREFIX}{document_id}:{digest}"
 
 
-def _make_semantic_key(document_id: int) -> str:
+def _make_semantic_key(document_id: Union[str, int]) -> str:
     """Redis key storing semantic vectors for a document."""
     return f"{_SEMANTIC_KEY_PREFIX}{document_id}"
 
@@ -97,7 +108,7 @@ def _cosine_similarity(v1: List[float], v2: List[float]) -> float:
 
 # ── Tier 1: Exact Hash Cache ─────────────────────────────────────────────
 
-def get_cached_answer(document_id: int, question: str) -> Optional[str]:
+def get_cached_answer(document_id: Union[str, int], question: str) -> Optional[str]:
     """
     Tier 1 Cache: Look up exact answer for this (document, question) pair.
     Returns cached answer string or None.
@@ -121,7 +132,7 @@ def get_cached_answer(document_id: int, question: str) -> Optional[str]:
 
 
 def set_cached_answer(
-    document_id: int,
+    document_id: Union[str, int],
     question: str,
     answer: str,
     ttl: Optional[int] = None,
@@ -133,7 +144,7 @@ def set_cached_answer(
     if _redis_client is None:
         return True
     try:
-        payload = json.dumps({"document_id": document_id, "question": question, "answer": answer})
+        payload = json.dumps({"document_id": str(document_id), "question": question, "answer": answer})
         _redis_client.setex(
             name=cache_key,
             time=ttl or REDIS_CACHE_TTL,
@@ -148,7 +159,7 @@ def set_cached_answer(
 # ── Tier 2: Semantic Similarity Cache ───────────────────────────────────
 
 def get_semantic_cached_answer(
-    document_id: int,
+    document_id: Union[str, int],
     query_embedding: List[float],
     threshold: float = SEMANTIC_CACHE_THRESHOLD,
 ) -> Tuple[Optional[str], float, Optional[str]]:
@@ -202,7 +213,7 @@ def get_semantic_cached_answer(
 
 
 def set_semantic_cached_answer(
-    document_id: int,
+    document_id: Union[str, int],
     question: str,
     query_embedding: List[float],
     answer: str,
@@ -215,7 +226,7 @@ def set_semantic_cached_answer(
         return False
 
     payload = {
-        "document_id": document_id,
+        "document_id": str(document_id),
         "question": question,
         "embedding": query_embedding,
         "answer": answer,
@@ -243,7 +254,7 @@ def set_semantic_cached_answer(
 
 # ── Cache Invalidation & Stats ──────────────────────────────────────────
 
-def invalidate_document_cache(document_id: int) -> int:
+def invalidate_document_cache(document_id: Union[str, int]) -> int:
     """Delete all exact and semantic cached answers for a given document_id."""
     deleted = 0
     # Clear memory
